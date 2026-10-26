@@ -1,5 +1,6 @@
 import { ed25519 } from '@noble/curves/ed25519.js'
 import { p256, p384 } from '@noble/curves/nist.js'
+import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js'
 import {
   CifraError,
   decodeEnvelope,
@@ -10,8 +11,16 @@ import {
   utf8ToBytes,
 } from './bytes'
 import { fingerprintFull } from './kdf'
+import { dsaFingerprint, dsaSign, dsaVerify, generateDsaKeyPair } from './dsa'
 
-export type SigAlg = 'ECDSA-P256' | 'ECDSA-P384' | 'Ed25519' | 'RSA-PSS-2048' | 'RSA-PSS-3072'
+export type SigAlg =
+  | 'ECDSA-P256'
+  | 'ECDSA-P384'
+  | 'Ed25519'
+  | 'DSA-2048'
+  | 'ML-DSA-65'
+  | 'RSA-PSS-2048'
+  | 'RSA-PSS-3072'
 
 export type SigBundle = {
   alg: SigAlg
@@ -49,6 +58,22 @@ export const SIGNATURE_ALGORITHMS: {
     family: 'Curva de NIST',
     description:
       'Mayor margen de seguridad que P-256 (nivel ~192 bits). Firmas de 96 bytes. Recomendado para datos de larga vida.',
+    level: 'recomendado',
+  },
+  {
+    id: 'DSA-2048',
+    name: 'DSA 2048/256',
+    family: 'DSA clásico',
+    description:
+      'Digital Signature Algorithm sobre el grupo MODP de 2048 bits con subgrupo primo de 256 bits (RFC 5114). Firma de 64 bytes.',
+    level: 'aceptable',
+  },
+  {
+    id: 'ML-DSA-65',
+    name: 'ML-DSA-65',
+    family: 'Post-cuántico (Dilithium)',
+    description:
+      'Firma digital post-cuántica estandarizada por el NIST en FIPS 204. Diseñada para resistir ataques de computación cuántica.',
     level: 'recomendado',
   },
   {
@@ -94,6 +119,24 @@ export async function generateSigKey(alg: SigAlg): Promise<SigBundle> {
       createdAt: Date.now(),
     }
   }
+  if (alg === 'DSA-2048') {
+    const pair = generateDsaKeyPair()
+    return {
+      alg,
+      publicKey: pair.publicKey,
+      privateKey: pair.privateKey,
+      createdAt: pair.createdAt,
+    }
+  }
+  if (alg === 'ML-DSA-65') {
+    const { secretKey, publicKey } = ml_dsa65.keygen()
+    return {
+      alg,
+      publicKey: toBase64(publicKey),
+      privateKey: toBase64(secretKey),
+      createdAt: Date.now(),
+    }
+  }
 
   const pair = await crypto.subtle.generateKey(
     {
@@ -114,6 +157,7 @@ export async function generateSigKey(alg: SigAlg): Promise<SigBundle> {
 }
 
 export function sigFingerprint(bundle: SigBundle): string {
+  if (bundle.alg === 'DSA-2048') return dsaFingerprint(bundle.publicKey)
   return fingerprintFull(bundle.publicKey).slice(0, 32).toUpperCase()
 }
 
@@ -126,6 +170,10 @@ export async function signMessage(message: string, bundle: SigBundle): Promise<s
     signature = ed25519.sign(data, fromBase64(bundle.privateKey))
   } else if (bundle.alg === 'ECDSA-P256' || bundle.alg === 'ECDSA-P384') {
     signature = ec(bundle.alg).sign(data, fromBase64(bundle.privateKey), { format: 'compact' })
+  } else if (bundle.alg === 'DSA-2048') {
+    signature = dsaSign(data, bundle.privateKey)
+  } else if (bundle.alg === 'ML-DSA-65') {
+    signature = ml_dsa65.sign(data, fromBase64(bundle.privateKey))
   } else {
     const key = await crypto.subtle.importKey(
       'jwk',
@@ -170,6 +218,10 @@ export async function verifyMessage(
     valid = ed25519.verify(sig, data, fromBase64(publicKey), { zip215: false })
   } else if (alg === 'ECDSA-P256' || alg === 'ECDSA-P384') {
     valid = ec(alg).verify(sig, data, fromBase64(publicKey))
+  } else if (alg === 'DSA-2048') {
+    valid = dsaVerify(data, sig, publicKey)
+  } else if (alg === 'ML-DSA-65') {
+    valid = ml_dsa65.verify(sig, data, fromBase64(publicKey))
   } else {
     const key = await crypto.subtle.importKey(
       'jwk',
@@ -185,6 +237,9 @@ export async function verifyMessage(
     valid,
     alg,
     publicKey,
-    fingerprint: fingerprintFull(publicKey).slice(0, 32).toUpperCase(),
+    fingerprint:
+      alg === 'DSA-2048'
+        ? dsaFingerprint(publicKey)
+        : fingerprintFull(publicKey).slice(0, 32).toUpperCase(),
   }
 }

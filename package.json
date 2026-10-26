@@ -15,6 +15,7 @@
     "@noble/ciphers": "^2.4.0",
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
+    "@noble/post-quantum": "^0.7.1",
     "crypto-js": "^4.2.0",
     "lucide-react": "^1.61.0",
     "react": "^19.3.1",

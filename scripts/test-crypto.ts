@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from 'node:crypto'
 import { SYMMETRIC_ALGORITHMS, encryptSymmetric, decryptSymmetric } from '../src/lib/symmetric'
 import {
   eciesDecrypt,
@@ -13,15 +14,32 @@ import {
 import { SIGNATURE_ALGORITHMS, generateSigKey, signMessage, verifyMessage } from '../src/lib/signatures'
 import {
   deriveExchangeKey,
+  dhDecrypt,
+  dhEncrypt,
+  generateDhKeyPair,
   generateModpPair,
   generateX25519Pair,
   modpSharedSecret,
   x25519SharedSecret,
 } from '../src/lib/dh'
+import {
+  generateMlKemKeyPair,
+  mlKemDecrypt,
+  mlKemEncrypt,
+} from '../src/lib/mlkem'
+import {
+  importDhKeyMaterial,
+  importEcKeyMaterial,
+  importElGamalKeyMaterial,
+  importMlKemKeyMaterial,
+  importRsaKeyMaterial,
+} from '../src/lib/external-keys'
 import { CLASSIC_ALGORITHMS, runClassic } from '../src/lib/classic'
-import { toHex } from '../src/lib/bytes'
+import { toBase64, toHex } from '../src/lib/bytes'
 
 const text = 'Hola 🔐 mundo. Acentos: ñáéíóú. ' + 'x'.repeat(200)
+const pem = (label: string, der: Uint8Array) =>
+  `-----BEGIN ${label}-----\n${toBase64(der)}\n-----END ${label}-----`
 let failures = 0
 const check = (name: string, fn: () => void | Promise<void>) => {
   try {
@@ -92,6 +110,84 @@ const main = async () => {
     const kp = generateElGamalKeyPair()
     const enc = elgamalEncrypt(text, kp.publicKey)
     if (elgamalDecrypt(enc, kp.secretKey) !== text) throw new Error('mismatch')
+  })
+
+  await check('DH híbrido MODP', () => {
+    const kp = generateDhKeyPair()
+    const enc = dhEncrypt(text, kp.publicKey)
+    if (dhDecrypt(enc, kp.secretKey) !== text) throw new Error('mismatch')
+  })
+
+  await check('ML-KEM-768 híbrido', () => {
+    const kp = generateMlKemKeyPair()
+    const enc = mlKemEncrypt(text, kp.publicKey)
+    if (mlKemDecrypt(enc, kp.secretKey) !== text) throw new Error('mismatch')
+  })
+
+  await check('clave externa RSA PKCS#8', async () => {
+    const kp = await generateRsaKeyPair(2048)
+    const key = await crypto.subtle.importKey(
+      'jwk',
+      kp.privateKey,
+      { name: 'RSA-OAEP', hash: 'SHA-256' },
+      true,
+      ['decrypt'],
+    )
+    const der = new Uint8Array(await crypto.subtle.exportKey('pkcs8', key))
+    const imported = await importRsaKeyMaterial(pem('PRIVATE KEY', der))
+    const enc = await rsaEncrypt(text, kp.publicKey, 'hybrid')
+    if ((await rsaDecrypt(enc, imported.privateKey)) !== text) throw new Error('mismatch')
+  })
+
+  await check('clave externa RSA PKCS#1', async () => {
+    const { privateKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    })
+    const imported = await importRsaKeyMaterial(privateKey)
+    const enc = await rsaEncrypt(text, imported.publicKey, 'hybrid')
+    if ((await rsaDecrypt(enc, imported.privateKey)) !== text) throw new Error('mismatch')
+  })
+
+  await check('clave externa ECC raw', async () => {
+    const kp = generateEcKeyPair()
+    const imported = await importEcKeyMaterial(kp.secretKey)
+    const enc = eciesEncrypt(text, imported.publicKey)
+    if (eciesDecrypt(enc, imported.secretKey) !== text) throw new Error('mismatch')
+  })
+
+  await check('clave externa ECC PKCS#8', async () => {
+    const pair = await crypto.subtle.generateKey(
+      { name: 'ECDH', namedCurve: 'P-256' },
+      true,
+      ['deriveBits'],
+    )
+    const der = new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey))
+    const imported = await importEcKeyMaterial(pem('PRIVATE KEY', der))
+    const enc = eciesEncrypt(text, imported.publicKey)
+    if (eciesDecrypt(enc, imported.secretKey) !== text) throw new Error('mismatch')
+  })
+
+  await check('clave externa ElGamal hex', () => {
+    const kp = generateElGamalKeyPair()
+    const imported = importElGamalKeyMaterial(kp.secretKey)
+    const enc = elgamalEncrypt(text, imported.publicKey)
+    if (elgamalDecrypt(enc, imported.secretKey) !== text) throw new Error('mismatch')
+  })
+
+  await check('clave externa DH hex', () => {
+    const kp = generateDhKeyPair()
+    const imported = importDhKeyMaterial(kp.secretKey)
+    const enc = dhEncrypt(text, imported.publicKey)
+    if (dhDecrypt(enc, imported.secretKey) !== text) throw new Error('mismatch')
+  })
+
+  await check('clave externa ML-KEM base64', () => {
+    const kp = generateMlKemKeyPair()
+    const imported = importMlKemKeyMaterial(kp.secretKey)
+    const enc = mlKemEncrypt(text, imported.publicKey)
+    if (mlKemDecrypt(enc, imported.secretKey) !== text) throw new Error('mismatch')
   })
 
   for (const alg of SIGNATURE_ALGORITHMS) {

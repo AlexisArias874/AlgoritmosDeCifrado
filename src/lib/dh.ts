@@ -1,13 +1,18 @@
+import { gcm } from '@noble/ciphers/aes.js'
 import { x25519 } from '@noble/curves/ed25519.js'
 import {
   bigIntToBytes,
+  bytesToUtf8,
   CifraError,
+  decodeEnvelope,
+  encodeEnvelope,
   fromBase64,
   randomBytes,
   toBase64,
+  utf8ToBytes,
 } from './bytes'
 import { MODP_2048, MODP_GENERATOR, hexToBigInt, modPow, randomScalar } from './bigmath'
-import { hkdfKey } from './kdf'
+import { fingerprintFull, hkdfKey } from './kdf'
 
 export type ExchangePair = {
   secretKey: string
@@ -43,6 +48,73 @@ export function modpSharedSecret(secretHex: string, peerPublicHex: string): Uint
   }
   const shared = modPow(peer, secret, MODP_2048)
   return bigIntToBytes(shared, 256)
+}
+
+export type DhKeyBundle = {
+  alg: 'DH-MODP2048'
+  secretKey: string
+  publicKey: string
+  group: string
+  createdAt: number
+}
+
+const DH_INFO = 'cifra-dh-modp2048-aesgcm-v1'
+
+export function generateDhKeyPair(): DhKeyBundle {
+  const pair = generateModpPair()
+  return {
+    alg: 'DH-MODP2048',
+    secretKey: pair.secretKey,
+    publicKey: pair.publicKey,
+    group: DH_GROUP.name,
+    createdAt: Date.now(),
+  }
+}
+
+export function dhFingerprint(bundle: DhKeyBundle): string {
+  return fingerprintFull(bundle.publicKey).slice(0, 32).toUpperCase()
+}
+
+/**
+ * Cifrado híbrido con Diffie-Hellman efímero-estático: el emisor crea un
+ * par temporal, acuerda una clave con la clave pública del receptor y cifra
+ * el texto con AES-256-GCM. Es el mismo patrón que usa ECIES con curvas.
+ */
+export function dhEncrypt(plaintext: string, recipientPublicHex: string): string {
+  if (!plaintext) throw new CifraError('Escribe el texto que quieres cifrar.')
+  const ephemeral = generateModpPair()
+  const shared = modpSharedSecret(ephemeral.secretKey, recipientPublicHex)
+  const salt = randomBytes(16)
+  const key = hkdfKey(shared, DH_INFO, 32, salt)
+  const iv = randomBytes(12)
+  const ct = gcm(key, iv).encrypt(utf8ToBytes(plaintext))
+
+  return encodeEnvelope({
+    v: 1,
+    alg: 'DH-MODP2048-A256GCM',
+    kdf: 'HKDF-SHA256',
+    epk: ephemeral.publicKey,
+    salt: toBase64(salt),
+    iv: toBase64(iv),
+    ct: toBase64(ct),
+  })
+}
+
+export function dhDecrypt(payload: string, secretKeyHex: string): string {
+  const env = decodeEnvelope(payload)
+  if (env.alg !== 'DH-MODP2048-A256GCM') {
+    throw new CifraError('El paquete no es Diffie-Hellman MODP-2048. Revisa el algoritmo seleccionado.')
+  }
+  const shared = modpSharedSecret(secretKeyHex, String(env.epk ?? ''))
+  const salt = fromBase64(String(env.salt ?? ''))
+  const key = hkdfKey(shared, DH_INFO, 32, salt)
+  try {
+    return bytesToUtf8(
+      gcm(key, fromBase64(String(env.iv))).decrypt(fromBase64(String(env.ct))),
+    )
+  } catch {
+    throw new CifraError('No se pudo descifrar: clave privada incorrecta o datos alterados.')
+  }
 }
 
 export function generateX25519Pair(): ExchangePair {
